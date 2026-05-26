@@ -45,7 +45,7 @@ export async function streamAgentResponse(
     : userProblem;
 
   const result = await getGenAI().models.generateContentStream({
-    model: "gemini-3.5-flash",
+    model: "gemini-2.5-flash",
     contents: prompt,
     config: {
       systemInstruction: systemPrompt,
