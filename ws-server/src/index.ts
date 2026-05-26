@@ -1,4 +1,5 @@
-import "dotenv/config";
+import dotenv from "dotenv";
+dotenv.config({ override: true });
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -6,6 +7,11 @@ import cors from "cors";
 import { runDebate } from "./orchestrator";
 
 const PORT = parseInt(process.env.PORT || "4000", 10);
+
+// Print masked Gemini API key to help user verify the loaded value
+const apiKey = process.env.GEMINI_API_KEY || "";
+const maskedKey = apiKey ? `${apiKey.slice(0, 6)}...${apiKey.slice(-4)}` : "NOT FOUND";
+console.log(`[Startup] Loaded Gemini API Key: ${maskedKey}`);
 
 // ─── Express + HTTP Server ─────────────────────────────────────────────────
 const app = express();

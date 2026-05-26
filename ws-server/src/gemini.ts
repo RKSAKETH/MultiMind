@@ -1,36 +1,32 @@
-import {
-  GoogleGenerativeAI,
-  HarmCategory,
-  HarmBlockThreshold,
-} from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 
-let genAI: GoogleGenerativeAI | null = null;
+let genAI: GoogleGenAI | null = null;
 
-function getGenAI(): GoogleGenerativeAI {
+function getGenAI(): GoogleGenAI {
   if (!genAI) {
-    genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+    genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
   }
   return genAI;
 }
 
 const SAFETY_SETTINGS = [
   {
-    category: HarmCategory.HARM_CATEGORY_HARASSMENT,
-    threshold: HarmBlockThreshold.BLOCK_NONE,
+    category: "HARM_CATEGORY_HARASSMENT",
+    threshold: "BLOCK_NONE",
   },
   {
-    category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-    threshold: HarmBlockThreshold.BLOCK_NONE,
+    category: "HARM_CATEGORY_HATE_SPEECH",
+    threshold: "BLOCK_NONE",
   },
   {
-    category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-    threshold: HarmBlockThreshold.BLOCK_NONE,
+    category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+    threshold: "BLOCK_NONE",
   },
   {
-    category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-    threshold: HarmBlockThreshold.BLOCK_NONE,
+    category: "HARM_CATEGORY_DANGEROUS_CONTENT",
+    threshold: "BLOCK_NONE",
   },
-];
+] as any;
 
 /**
  * Streams a Gemini response for a single agent.
@@ -44,22 +40,23 @@ export async function streamAgentResponse(
   onToken: (token: string) => void,
   onDone: () => void
 ): Promise<string> {
-  const model = getGenAI().getGenerativeModel({
-    model: "gemini-1.5-flash",
-    systemInstruction: systemPrompt,
-    safetySettings: SAFETY_SETTINGS,
-  });
-
   const prompt = memoryContext
     ? `${userProblem}\n${memoryContext}`
     : userProblem;
 
-  const result = await model.generateContentStream(prompt);
+  const result = await getGenAI().models.generateContentStream({
+    model: "gemini-3.5-flash",
+    contents: prompt,
+    config: {
+      systemInstruction: systemPrompt,
+      safetySettings: SAFETY_SETTINGS,
+    },
+  });
 
   let fullText = "";
 
-  for await (const chunk of result.stream) {
-    const text = chunk.text();
+  for await (const chunk of result) {
+    const text = chunk.text;
     if (text) {
       fullText += text;
       onToken(text);
@@ -81,12 +78,6 @@ export async function streamSynthesis(
   onToken: (token: string) => void,
   onDone: () => void
 ): Promise<string> {
-  const model = getGenAI().getGenerativeModel({
-    model: "gemini-1.5-flash",
-    systemInstruction: systemPrompt,
-    safetySettings: SAFETY_SETTINGS,
-  });
-
   const synthesisPrompt = `
 ORIGINAL PROBLEM:
 ${problem}
@@ -116,12 +107,19 @@ ${agentOutputs["creative"] || "(no output)"}
 Please synthesize these four analyses into a comprehensive final answer.
 `.trim();
 
-  const result = await model.generateContentStream(synthesisPrompt);
+  const result = await getGenAI().models.generateContentStream({
+    model: "gemini-1.5-flash",
+    contents: synthesisPrompt,
+    config: {
+      systemInstruction: systemPrompt,
+      safetySettings: SAFETY_SETTINGS,
+    },
+  });
 
   let fullText = "";
 
-  for await (const chunk of result.stream) {
-    const text = chunk.text();
+  for await (const chunk of result) {
+    const text = chunk.text;
     if (text) {
       fullText += text;
       onToken(text);
@@ -131,3 +129,4 @@ Please synthesize these four analyses into a comprehensive final answer.
   onDone();
   return fullText;
 }
+

@@ -7,7 +7,7 @@ import { eq, and } from "drizzle-orm";
 // POST /api/sessions/[id]/save — save agent turns and synthesis after debate
 export async function POST(
   req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { userId: clerkId } = await auth();
@@ -15,7 +15,7 @@ export async function POST(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const sessionId = params.id;
+    const { id: sessionId } = await params;
 
     // Verify session belongs to this user
     const dbUser = await db
@@ -84,7 +84,7 @@ export async function POST(
 // GET /api/sessions/[id] — get session with all agent turns and synthesis
 export async function GET(
   _req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { userId: clerkId } = await auth();
@@ -92,7 +92,7 @@ export async function GET(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const sessionId = params.id;
+    const { id: sessionId } = await params;
 
     const dbUser = await db
       .select({ id: users.id })

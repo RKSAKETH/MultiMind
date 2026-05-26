@@ -1,5 +1,5 @@
 import { Suspense } from "react";
-// import DebatePageClient from "./DebateClient";
+import DebatePageClient from "./DebateClient";
 
 export const metadata = {
   title: "Debate — MultiMind",
@@ -18,7 +18,7 @@ export default function DebatePage() {
         </div>
       }
     >
-      {/* <DebatePageClient /> */}
+      <DebatePageClient />
     </Suspense>
   );
 }
