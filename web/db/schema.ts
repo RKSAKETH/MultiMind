@@ -24,6 +24,7 @@ export const agentTurns = pgTable("agent_turns", {
   agentId: text("agent_id").notNull(),
   agentName: text("agent_name").notNull(),
   content: text("content").notNull(),
+  turnType: text("turn_type").notNull().default("debate"), // "debate" | "followup"
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

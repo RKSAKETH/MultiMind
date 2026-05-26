@@ -4,7 +4,7 @@ import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import cors from "cors";
-import { runDebate } from "./orchestrator";
+import { runDebate, runFollowUp } from "./orchestrator";
 
 const PORT = parseInt(process.env.PORT || "4000", 10);
 
@@ -60,6 +60,29 @@ io.on("connection", (socket) => {
         socket.emit("error", {
           message: "An unexpected error occurred during the debate.",
         });
+      }
+    }
+  );
+
+  socket.on(
+    "followup_question",
+    async (data: { sessionId: string; question: string; targetAgent: string }) => {
+      const { sessionId, question, targetAgent } = data;
+
+      if (!sessionId || !question || !targetAgent) {
+        socket.emit("error", { message: "Missing required fields: sessionId, question, targetAgent" });
+        return;
+      }
+
+      console.log(
+        `[Socket] followup_question received — session=${sessionId}, target=${targetAgent}, question="${question.slice(0, 60)}"`
+      );
+
+      try {
+        await runFollowUp(socket, { sessionId, question, targetAgent: targetAgent as any });
+      } catch (err) {
+        console.error("[Socket] Unhandled error in runFollowUp:", err);
+        socket.emit("error", { message: "An unexpected error occurred during the follow-up." });
       }
     }
   );

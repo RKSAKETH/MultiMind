@@ -4,45 +4,38 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useUser, UserButton } from "@clerk/nextjs";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { getSocket, disconnectSocket } from "@/lib/socket";
-import { AgentPanel } from "@/components/AgentPanel";
-import { SynthesisPanel } from "@/components/SynthesisPanel";
+import { getSocket } from "@/lib/socket";
+import { ChatBubble, ColorScheme } from "@/components/ChatBubble";
+import { FollowUpInput } from "@/components/FollowUpInput";
+
+// ─── Types ──────────────────────────────────────────────────────────────────
 
 type AgentId = "strategist" | "critic" | "technical" | "creative";
+type TargetAgent = AgentId | "all";
 
-interface AgentState {
-  tokens: string[];
+interface TimelineEntry {
+  id: string;
+  type: "agent" | "synthesis" | "you" | "followup_agent";
+  agentId?: AgentId;
+  agentName: string;
+  colorScheme: ColorScheme;
+  content: string;
+  isStreaming: boolean;
   isDone: boolean;
-  isActive: boolean;
 }
 
-const AGENT_CONFIGS: {
-  id: AgentId;
-  name: string;
-  colorScheme: "blue" | "red" | "green" | "purple";
-}[] = [
-  { id: "strategist", name: "Strategist", colorScheme: "blue" },
-  { id: "critic", name: "Critic", colorScheme: "red" },
-  { id: "technical", name: "Technical Expert", colorScheme: "green" },
-  { id: "creative", name: "Creative", colorScheme: "purple" },
-];
+type DebateStatus = "idle" | "creating_session" | "debating" | "synthesizing" | "done" | "followup" | "error";
 
-function createInitialAgentState(): Record<AgentId, AgentState> {
-  return {
-    strategist: { tokens: [], isDone: false, isActive: false },
-    critic: { tokens: [], isDone: false, isActive: false },
-    technical: { tokens: [], isDone: false, isActive: false },
-    creative: { tokens: [], isDone: false, isActive: false },
-  };
-}
+// ─── Constants ───────────────────────────────────────────────────────────────
 
-type DebateStatus =
-  | "idle"
-  | "creating_session"
-  | "debating"
-  | "synthesizing"
-  | "done"
-  | "error";
+const AGENT_CONFIG: Record<AgentId, { name: string; color: ColorScheme; icon: string }> = {
+  strategist: { name: "Strategist", color: "blue", icon: "🎯" },
+  critic: { name: "Critic", color: "red", icon: "⚔️" },
+  technical: { name: "Technical Expert", color: "green", icon: "⚙️" },
+  creative: { name: "Creative", color: "purple", icon: "✨" },
+};
+
+// ─── Component ───────────────────────────────────────────────────────────────
 
 export default function DebateClient() {
   const { user, isLoaded } = useUser();
@@ -53,26 +46,61 @@ export default function DebateClient() {
   const [status, setStatus] = useState<DebateStatus>("idle");
   const [errorMsg, setErrorMsg] = useState("");
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [agentStates, setAgentStates] = useState<Record<AgentId, AgentState>>(
-    createInitialAgentState()
-  );
-  const [synthesisTokens, setSynthesisTokens] = useState<string[]>([]);
-  const [synthesisDone, setSynthesisDone] = useState(false);
-  const [showSynthesis, setShowSynthesis] = useState(false);
+  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
+  const [isFollowupStreaming, setIsFollowupStreaming] = useState(false);
 
+  // Accumulated text refs for saving to DB (avoids stale closures)
   const agentOutputsRef = useRef<Record<string, string>>({});
   const synthesisRef = useRef("");
+  const followupOutputsRef = useRef<{ agentId: string; agentName: string; content: string }[]>([]);
+  const timelineEndRef = useRef<HTMLDivElement>(null);
+  const entryCounterRef = useRef(0);
 
-  const resetState = useCallback(() => {
-    setAgentStates(createInitialAgentState());
-    setSynthesisTokens([]);
-    setSynthesisDone(false);
-    setShowSynthesis(false);
-    agentOutputsRef.current = {};
-    synthesisRef.current = "";
+  const genId = () => `entry-${++entryCounterRef.current}`;
+
+  // Auto-scroll timeline to bottom on every update
+  useEffect(() => {
+    if (timelineEndRef.current) {
+      timelineEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [timeline]);
+
+  // ─── Helpers ───────────────────────────────────────────────────────────────
+
+  const updateLastEntryOfType = useCallback(
+    (
+      agentId: string | undefined,
+      type: TimelineEntry["type"],
+      updater: (entry: TimelineEntry) => Partial<TimelineEntry>
+    ) => {
+      setTimeline((prev) => {
+        const idx = [...prev].reverse().findIndex(
+          (e) => e.type === type && (agentId === undefined || e.agentId === agentId)
+        );
+        if (idx === -1) return prev;
+        const realIdx = prev.length - 1 - idx;
+        const updated = [...prev];
+        updated[realIdx] = { ...updated[realIdx], ...updater(updated[realIdx]) };
+        return updated;
+      });
+    },
+    []
+  );
+
+  const appendToLastEntry = useCallback(
+    (agentId: string | undefined, type: TimelineEntry["type"], token: string) => {
+      updateLastEntryOfType(agentId, type, (e) => ({ content: e.content + token }));
+    },
+    [updateLastEntryOfType]
+  );
+
+  const addEntry = useCallback((entry: TimelineEntry) => {
+    setTimeline((prev) => [...prev, entry]);
   }, []);
 
-  const saveResults = useCallback(async (sessionId: string) => {
+  // ─── Save debate results to DB ─────────────────────────────────────────────
+
+  const saveDebateResults = useCallback(async (sessionId: string) => {
     try {
       await fetch(`/api/sessions/${sessionId}`, {
         method: "POST",
@@ -83,16 +111,37 @@ export default function DebateClient() {
         }),
       });
     } catch (err) {
-      console.warn("Failed to save results to DB:", err);
+      console.warn("Failed to save debate results:", err);
     }
   }, []);
+
+  const saveFollowupResults = useCallback(async (sessionId: string) => {
+    if (followupOutputsRef.current.length === 0) return;
+    try {
+      await fetch(`/api/sessions/${sessionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ followupTurns: followupOutputsRef.current }),
+      });
+      followupOutputsRef.current = [];
+    } catch (err) {
+      console.warn("Failed to save follow-up results:", err);
+    }
+  }, []);
+
+  // ─── Start debate ──────────────────────────────────────────────────────────
 
   const startDebate = useCallback(async () => {
     if (!problem.trim() || !user) return;
 
-    resetState();
-    setStatus("creating_session");
+    // Reset
+    setTimeline([]);
+    agentOutputsRef.current = {};
+    synthesisRef.current = "";
+    followupOutputsRef.current = [];
+    entryCounterRef.current = 0;
     setErrorMsg("");
+    setStatus("creating_session");
 
     let sessionId: string;
     try {
@@ -113,12 +162,17 @@ export default function DebateClient() {
 
     setStatus("debating");
 
-    setAgentStates((prev) => {
-      const next = { ...prev };
-      (Object.keys(next) as AgentId[]).forEach((id) => {
-        next[id] = { ...next[id], isActive: true };
-      });
-      return next;
+    // Pre-create timeline entry for the first agent (Strategist) as "Thinking..."
+    // The rest will be added reactively when each agent starts streaming
+    addEntry({
+      id: genId(),
+      type: "agent",
+      agentId: "strategist",
+      agentName: "Strategist",
+      colorScheme: "blue",
+      content: "",
+      isStreaming: true,
+      isDone: false,
     });
 
     const socket = getSocket();
@@ -127,43 +181,76 @@ export default function DebateClient() {
     socket.off("agent_done");
     socket.off("synthesis_token");
     socket.off("debate_done");
+    socket.off("followup_token");
+    socket.off("followup_done");
     socket.off("error");
 
     socket.on(
       "agent_token",
-      ({ agentId, token }: { agentId: AgentId; token: string }) => {
-        agentOutputsRef.current[agentId] =
-          (agentOutputsRef.current[agentId] ?? "") + token;
-        setAgentStates((prev) => ({
-          ...prev,
-          [agentId]: {
-            ...prev[agentId],
-            tokens: [...prev[agentId].tokens, token],
-            isActive: true,
-          },
-        }));
+      ({ agentId, agentName, token }: { agentId: AgentId; agentName: string; token: string }) => {
+        agentOutputsRef.current[agentId] = (agentOutputsRef.current[agentId] ?? "") + token;
+        appendToLastEntry(agentId, "agent", token);
       }
     );
 
-    socket.on("agent_done", ({ agentId }: { agentId: AgentId }) => {
-      setAgentStates((prev) => ({
-        ...prev,
-        [agentId]: { ...prev[agentId], isDone: true, isActive: false },
-      }));
-    });
+    socket.on(
+      "agent_done",
+      ({ agentId, agentName }: { agentId: AgentId; agentName: string; fullResponse: string }) => {
+        // Mark current agent done
+        updateLastEntryOfType(agentId, "agent", () => ({ isStreaming: false, isDone: true }));
+
+        // Add next agent's "Thinking..." bubble pre-emptively
+        const order: AgentId[] = ["strategist", "critic", "technical", "creative"];
+        const nextIdx = order.indexOf(agentId) + 1;
+        if (nextIdx < order.length) {
+          const nextId = order[nextIdx];
+          const cfg = AGENT_CONFIG[nextId];
+          addEntry({
+            id: genId(),
+            type: "agent",
+            agentId: nextId,
+            agentName: cfg.name,
+            colorScheme: cfg.color,
+            content: "",
+            isStreaming: true,
+            isDone: false,
+          });
+        }
+      }
+    );
 
     socket.on("synthesis_token", ({ token }: { token: string }) => {
       synthesisRef.current += token;
       setStatus("synthesizing");
-      setShowSynthesis(true);
-      setSynthesisTokens((prev) => [...prev, token]);
+
+      setTimeline((prev) => {
+        const hasSynthesis = prev.some((e) => e.type === "synthesis");
+        if (!hasSynthesis) {
+          return [
+            ...prev,
+            {
+              id: genId(),
+              type: "synthesis",
+              agentName: "Final Verdict",
+              colorScheme: "amber" as ColorScheme,
+              content: token,
+              isStreaming: true,
+              isDone: false,
+            },
+          ];
+        }
+        return prev.map((e, i) =>
+          i === prev.length - 1 && e.type === "synthesis"
+            ? { ...e, content: e.content + token }
+            : e
+        );
+      });
     });
 
     socket.on("debate_done", async () => {
-      setSynthesisDone(true);
+      updateLastEntryOfType(undefined, "synthesis", () => ({ isStreaming: false, isDone: true }));
       setStatus("done");
-      socket.disconnect();
-      await saveResults(sessionId);
+      await saveDebateResults(sessionId);
     });
 
     socket.on("error", ({ message }: { message: string }) => {
@@ -171,26 +258,103 @@ export default function DebateClient() {
       setStatus("error");
     });
 
-    if (!socket.connected) {
-      socket.connect();
-    }
+    if (!socket.connected) socket.connect();
 
     socket.emit("start_debate", {
       problem: problem.trim(),
       userId: user.id,
       sessionId,
     });
-  }, [problem, user, resetState, saveResults]);
+  }, [problem, user, addEntry, appendToLastEntry, updateLastEntryOfType, saveDebateResults]);
 
-  useEffect(() => {
-    return () => {
-      disconnectSocket();
-    };
-  }, []);
+  // ─── Follow-up Q&A ────────────────────────────────────────────────────────
 
-  const isRunning = status === "debating" || status === "synthesizing";
+  const submitFollowUp = useCallback(
+    (question: string, targetAgent: TargetAgent) => {
+      if (!currentSessionId) return;
+
+      setStatus("followup");
+      setIsFollowupStreaming(true);
+
+      // Add "You" bubble
+      addEntry({
+        id: genId(),
+        type: "you",
+        agentName: "You",
+        colorScheme: "gray",
+        content: question,
+        isStreaming: false,
+        isDone: true,
+      });
+
+      const socket = getSocket();
+
+      socket.off("followup_token");
+      socket.off("followup_done");
+
+      let currentFollowupAgentId: string | null = null;
+
+      socket.on(
+        "followup_token",
+        ({ agentId, agentName, token }: { agentId: string; agentName: string; token: string }) => {
+          if (currentFollowupAgentId !== agentId) {
+            // New agent responding — add a new bubble
+            currentFollowupAgentId = agentId;
+            const cfg = AGENT_CONFIG[agentId as AgentId];
+            addEntry({
+              id: genId(),
+              type: "followup_agent",
+              agentId: agentId as AgentId,
+              agentName: agentName,
+              colorScheme: cfg?.color ?? "gray",
+              content: token,
+              isStreaming: true,
+              isDone: false,
+            });
+            followupOutputsRef.current.push({ agentId, agentName, content: token });
+          } else {
+            // Same agent — append token
+            appendToLastEntry(agentId as AgentId, "followup_agent", token);
+            const last = followupOutputsRef.current[followupOutputsRef.current.length - 1];
+            if (last && last.agentId === agentId) last.content += token;
+          }
+        }
+      );
+
+      socket.on("followup_done", async () => {
+        setIsFollowupStreaming(false);
+        // Mark the last followup bubble as done
+        setTimeline((prev) => {
+          const updated = [...prev];
+          for (let i = updated.length - 1; i >= 0; i--) {
+            if (updated[i].type === "followup_agent") {
+              updated[i] = { ...updated[i], isStreaming: false, isDone: true };
+              break;
+            }
+          }
+          return updated;
+        });
+        setStatus("done");
+        await saveFollowupResults(currentSessionId!);
+      });
+
+      if (!socket.connected) socket.connect();
+
+      socket.emit("followup_question", {
+        sessionId: currentSessionId,
+        question,
+        targetAgent,
+      });
+    },
+    [currentSessionId, addEntry, appendToLastEntry, saveFollowupResults]
+  );
+
+  // ─── Derived state ─────────────────────────────────────────────────────────
+
+  const isRunning = status === "debating" || status === "synthesizing" || status === "followup";
   const canStart = problem.trim().length > 0 && !isRunning && isLoaded && !!user;
-  const agentsDoneCount = Object.values(agentStates).filter((a) => a.isDone).length;
+  const showFollowUp = status === "done" && !!currentSessionId;
+  const agentsDoneCount = Object.keys(agentOutputsRef.current).length;
 
   return (
     <div className="min-h-screen bg-[#080b12] flex flex-col">
@@ -198,12 +362,9 @@ export default function DebateClient() {
 
       {/* Header */}
       <header className="relative z-10 border-b border-white/5 bg-[#080b12]/80 backdrop-blur-sm sticky top-0">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+        <div className="max-w-3xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <Link
-              href="/dashboard"
-              className="flex items-center gap-3 hover:opacity-80 transition-opacity"
-            >
+            <Link href="/dashboard" className="flex items-center gap-3 hover:opacity-80 transition-opacity">
               <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
                 <span className="text-sm font-bold text-white">M</span>
               </div>
@@ -214,12 +375,22 @@ export default function DebateClient() {
           </div>
 
           <div className="flex items-center gap-4">
-            {isRunning && (
+            {status === "debating" && (
               <div className="flex items-center gap-2 text-xs text-gray-400">
                 <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
-                {status === "debating"
-                  ? `${agentsDoneCount}/4 agents done`
-                  : "Synthesizing..."}
+                Agent {agentsDoneCount + 1} of 4
+              </div>
+            )}
+            {status === "synthesizing" && (
+              <div className="flex items-center gap-2 text-xs text-amber-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                Synthesizing...
+              </div>
+            )}
+            {status === "followup" && (
+              <div className="flex items-center gap-2 text-xs text-purple-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse" />
+                Responding...
               </div>
             )}
             {status === "done" && (
@@ -233,14 +404,11 @@ export default function DebateClient() {
         </div>
       </header>
 
-      <main className="relative z-10 flex-1 max-w-7xl mx-auto w-full px-6 py-8 flex flex-col gap-8">
+      <main className="relative z-10 flex-1 max-w-3xl mx-auto w-full px-6 py-8 flex flex-col gap-6">
         {/* Input section */}
         <section className="glass-card rounded-2xl p-6">
           <div className="mb-4">
-            <label
-              htmlFor="problem-input"
-              className="block text-sm font-medium text-gray-300 mb-2"
-            >
+            <label htmlFor="problem-input" className="block text-sm font-medium text-gray-300 mb-2">
               Your Problem or Question
             </label>
             <textarea
@@ -248,14 +416,10 @@ export default function DebateClient() {
               value={problem}
               onChange={(e) => setProblem(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && canStart) {
-                  startDebate();
-                }
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && canStart) startDebate();
               }}
-              placeholder={
-                "Enter any problem, question, or idea...\n\ne.g. 'Should our startup build our own infrastructure or use AWS?'"
-              }
-              rows={4}
+              placeholder={"Enter any problem, question, or idea...\n\ne.g. 'Should our startup build our own infrastructure or use AWS?'"}
+              rows={3}
               disabled={isRunning}
               className="w-full bg-white/[0.03] border border-white/10 rounded-xl px-4 py-3 text-gray-200 placeholder-gray-600 text-sm resize-none focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
             />
@@ -263,7 +427,6 @@ export default function DebateClient() {
 
           <div className="flex items-center justify-between">
             <p className="text-xs text-gray-600">
-              {problem.length > 0 && `${problem.length} chars · `}
               Press{" "}
               <kbd className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-gray-500 text-xs font-mono">
                 Ctrl+Enter
@@ -289,7 +452,7 @@ export default function DebateClient() {
                 ? "Starting..."
                 : isRunning
                 ? "Running..."
-                : status === "done"
+                : timeline.length > 0
                 ? "Run Again"
                 : "Start Debate"}
             </button>
@@ -302,92 +465,21 @@ export default function DebateClient() {
           )}
         </section>
 
-        {/* Agent panels 2×2 grid */}
-        {(isRunning || status === "done" || agentsDoneCount > 0) && (
-          <section>
-            <div className="flex items-center gap-3 mb-4">
-              <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider">
-                Agent Responses
-              </h2>
-              {isRunning && status === "debating" && (
-                <div className="flex gap-1">
-                  {AGENT_CONFIGS.map((agent) => (
-                    <div
-                      key={agent.id}
-                      className={`w-1.5 h-1.5 rounded-full transition-all duration-300 ${
-                        agentStates[agent.id].isDone
-                          ? "bg-emerald-400"
-                          : agentStates[agent.id].isActive
-                          ? "bg-blue-400 animate-pulse"
-                          : "bg-gray-700"
-                      }`}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {AGENT_CONFIGS.map((agent) => (
-                <AgentPanel
-                  key={agent.id}
-                  agentId={agent.id}
-                  agentName={agent.name}
-                  colorScheme={agent.colorScheme}
-                  tokens={agentStates[agent.id].tokens}
-                  isDone={agentStates[agent.id].isDone}
-                  isActive={agentStates[agent.id].isActive}
-                />
-              ))}
-            </div>
-          </section>
-        )}
-
-        {/* Synthesis panel */}
-        {showSynthesis && (
-          <section>
-            <div className="flex items-center gap-3 mb-4">
-              <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider">
-                Synthesis
-              </h2>
-              {!synthesisDone && (
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-              )}
-            </div>
-            <SynthesisPanel
-              tokens={synthesisTokens}
-              isDone={synthesisDone}
-              isVisible={showSynthesis}
-            />
-          </section>
-        )}
-
-        {status === "done" && currentSessionId && (
-          <div className="flex justify-center pb-4">
-            <Link
-              href="/dashboard"
-              className="text-sm text-gray-500 hover:text-gray-300 transition-colors"
-            >
-              ← Back to all debates
-            </Link>
-          </div>
-        )}
-
         {/* Idle empty state */}
         {status === "idle" && (
           <div className="flex-1 flex flex-col items-center justify-center text-center py-16">
-            <div className="grid grid-cols-2 gap-3 mb-8 opacity-30">
+            <div className="flex flex-col gap-2 mb-8 opacity-30 w-full max-w-md">
               {[
-                { color: "border-blue-500/40 bg-blue-500/5", label: "Strategist" },
-                { color: "border-red-500/40 bg-red-500/5", label: "Critic" },
-                { color: "border-emerald-500/40 bg-emerald-500/5", label: "Technical" },
-                { color: "border-purple-500/40 bg-purple-500/5", label: "Creative" },
+                { color: "border-l-blue-500", label: "🎯 Strategist will set the strategy..." },
+                { color: "border-l-red-500", label: "⚔️ Critic will challenge it..." },
+                { color: "border-l-emerald-500", label: "⚙️ Technical Expert will implement it..." },
+                { color: "border-l-purple-500", label: "✨ Creative will reimagine it..." },
               ].map((a) => (
                 <div
                   key={a.label}
-                  className={`w-32 h-20 rounded-xl border ${a.color} flex items-center justify-center text-xs text-gray-500`}
+                  className={`h-10 rounded-r-xl rounded-bl-xl border-l-2 ${a.color} border border-white/5 bg-white/[0.02] flex items-center px-3`}
                 >
-                  {a.label}
+                  <span className="text-xs text-gray-500">{a.label}</span>
                 </div>
               ))}
             </div>
@@ -396,6 +488,51 @@ export default function DebateClient() {
               <strong className="text-gray-500">Start Debate</strong>
             </p>
           </div>
+        )}
+
+        {/* Timeline */}
+        {timeline.length > 0 && (
+          <section className="flex flex-col gap-4">
+            <div className="flex items-center gap-3">
+              <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider">
+                Round-Table Debate
+              </h2>
+              <div className="flex-1 h-px bg-white/5" />
+            </div>
+
+            <div className="flex flex-col gap-3">
+              {timeline.map((entry) => (
+                <ChatBubble
+                  key={entry.id}
+                  type={entry.type === "followup_agent" ? "followup_agent" : entry.type}
+                  agentId={entry.agentId}
+                  agentName={entry.agentName}
+                  colorScheme={entry.colorScheme}
+                  content={entry.content}
+                  isStreaming={entry.isStreaming}
+                  turnLabel={entry.type === "synthesis" ? "Final Verdict 🔮" : undefined}
+                  icon={entry.type === "synthesis" ? "🔮" : undefined}
+                />
+              ))}
+            </div>
+
+            <div ref={timelineEndRef} />
+          </section>
+        )}
+
+        {/* Follow-up Q&A section */}
+        {showFollowUp && (
+          <section>
+            <FollowUpInput
+              onSubmit={submitFollowUp}
+              isStreaming={isFollowupStreaming}
+            />
+            <div className="flex justify-center mt-6">
+              <Link href="/dashboard" className="text-sm text-gray-600 hover:text-gray-400 transition-colors">
+                ← Back to all debates
+              </Link>
+            </div>
+          </section>
         )}
       </main>
     </div>
