@@ -1,0 +1,73 @@
+import "dotenv/config";
+import express from "express";
+import { createServer } from "http";
+import { Server } from "socket.io";
+import cors from "cors";
+import { runDebate } from "./orchestrator";
+
+const PORT = parseInt(process.env.PORT || "4000", 10);
+
+// ─── Express + HTTP Server ─────────────────────────────────────────────────
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// Health check endpoint
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
+const httpServer = createServer(app);
+
+// ─── Socket.io ─────────────────────────────────────────────────────────────
+const io = new Server(httpServer, {
+  cors: {
+    origin: process.env.WEB_URL || "http://localhost:3000",
+    methods: ["GET", "POST"],
+    credentials: true,
+  },
+  pingTimeout: 120000,
+  pingInterval: 25000,
+});
+
+io.on("connection", (socket) => {
+  console.log(`[Socket] Client connected: ${socket.id}`);
+
+  socket.on(
+    "start_debate",
+    async (data: { problem: string; userId: string; sessionId: string }) => {
+      const { problem, userId, sessionId } = data;
+
+      if (!problem || !userId || !sessionId) {
+        socket.emit("error", { message: "Missing required fields: problem, userId, sessionId" });
+        return;
+      }
+
+      console.log(
+        `[Socket] start_debate received — session=${sessionId}, user=${userId}, problem="${problem.slice(0, 60)}..."`
+      );
+
+      try {
+        await runDebate(socket, { problem, userId, sessionId });
+      } catch (err) {
+        console.error("[Socket] Unhandled error in runDebate:", err);
+        socket.emit("error", {
+          message: "An unexpected error occurred during the debate.",
+        });
+      }
+    }
+  );
+
+  socket.on("disconnect", (reason) => {
+    console.log(`[Socket] Client disconnected: ${socket.id} — reason: ${reason}`);
+  });
+});
+
+// ─── Start Server ───────────────────────────────────────────────────────────
+httpServer.listen(PORT, () => {
+  console.log(`\n🧠 MultiMind WebSocket Server running on port ${PORT}`);
+  console.log(`   Health check: http://localhost:${PORT}/health`);
+  console.log(`   Waiting for debate connections...\n`);
+});
+
+export { io };
