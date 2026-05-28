@@ -108,7 +108,7 @@ Please synthesize these four analyses into a comprehensive final answer.
 `.trim();
 
   const result = await getGenAI().models.generateContentStream({
-    model: "gemini-1.5-flash",
+    model: "gemini-2.5-flash",
     contents: synthesisPrompt,
     config: {
       systemInstruction: systemPrompt,
